@@ -1,0 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar 17 14:16:48 2026
+
+@author: Sherwin Mathias
+"""
+
+requests
+beautifulsoup4
