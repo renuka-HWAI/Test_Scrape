@@ -4,8 +4,10 @@ on:
   schedule:
     # Every Monday at 04:00 UTC (09:30 AM IST)
     - cron: "0 4 * * 1"
-
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   run-pipeline:
