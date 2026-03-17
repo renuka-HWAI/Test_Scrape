@@ -177,7 +177,10 @@ def parse_date_loose(text: str) -> Optional[datetime]:
     t = re.sub(r"\s+", " ", text).strip()
     t = re.sub(r"(\d{1,2})(st|nd|rd|th)\b", r"\1", t, flags=re.IGNORECASE)
     try:
-        return date_parser.parse(t, fuzzy=True)
+        dt = date_parser.parse(t, fuzzy=True)
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt
     except Exception:
         return None
 
@@ -310,39 +313,19 @@ def parse_bhr_card(card, base_url: str):
 def parse_generic_listing(soup: BeautifulSoup, base_url: str):
     results = []
     seen = set()
-
-    for a in soup.select("h2 a, h3 a, h4 a"):
+    for a in soup.select("a[href*='beckers']"):
         href = a.get("href")
         title = a.get_text(" ", strip=True)
-
         if not href or not title:
             continue
-
+        if len(title) < 30:
+            continue
         url = normalize_url(base_url, href)
-
-        if ("beckerspayer.com" not in url) and ("beckershospitalreview.com" not in url):
-            continue
-
-        if len(title) < 20:
-            continue
-
         pub = None
-        parent = a.parent
-        for _ in range(8):
-            if parent is None:
-                break
-            text = parent.get_text(" ", strip=True)
-            if re.search(r"\b(20\d{2}|yesterday|\d+\s+hours?\s+ago|\d+\s+days?\s+ago)\b", text, re.IGNORECASE):
-                pub = parse_date_loose(text)
-                if pub:
-                    break
-            parent = parent.parent
-
         dedupe_key = (title.lower(), url)
         if dedupe_key not in seen:
             seen.add(dedupe_key)
             results.append((title, url, pub))
-
     return results
 
 
