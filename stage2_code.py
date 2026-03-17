@@ -46,7 +46,6 @@ BASE_DIR = Path(__file__).resolve().parent
 
 OUTPUT_DIR = BASE_DIR / "OUTPUT_STAGE2"
 
-INPUT_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # IMPORTANT:
