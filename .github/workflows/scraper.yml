@@ -60,7 +60,7 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
-          git add .
+          git add OUTPUT/ OUTPUT_STAGE2/ OUTPUT_STAGE3/
           git commit -m "Update pipeline outputs" || echo "No changes to commit"
 
           git push
