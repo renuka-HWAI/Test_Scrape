@@ -2,11 +2,10 @@ name: Weekly Automation Pipeline
 
 on:
   schedule:
-    # Runs every Monday at 04:00 UTC
-    # Adjust if needed
+    # Every Monday at 04:00 UTC (09:30 AM IST)
     - cron: "0 4 * * 1"
 
-  workflow_dispatch:   # Allows manual run from GitHub UI
+  workflow_dispatch:
 
 jobs:
   run-pipeline:
@@ -19,32 +18,47 @@ jobs:
 
     steps:
 
+      # Checkout repo
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # Setup Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
+      # Install dependencies
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Chrome (for Selenium)
+      # Install Chrome (needed for Selenium)
+      - name: Install Google Chrome
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
+      # Run Stage 1
       - name: Run Stage 1
-        run: |
-          python stage1_code.py
+        run: python stage1.py
 
+      # Run Stage 2
       - name: Run Stage 2
-        run: |
-          python stage2_code.py
+        run: python stage2.py
 
+      # Run Stage 3
       - name: Run Stage 3
+        run: python stage3.py
+
+      # Commit outputs (CRITICAL for persistence)
+      - name: Commit and Push Outputs
         run: |
-          python stage3_code.py
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          git add .
+          git commit -m "Update pipeline outputs" || echo "No changes to commit"
+
+          git push
