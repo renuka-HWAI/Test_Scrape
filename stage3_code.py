@@ -26,29 +26,34 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import os
+from pathlib import Path
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 
 # ======================
 # CONFIG
 # ======================
-IN_CSV =  r"C:\Users\Renuka Kolusu\TEG Business Solutions Pvt Ltd\HWAI - TEG-HealthWorks\ProviderIntel\ProviderIntel Induction\Article_summarizer\OUT_PUT_2022tocurr\stage2_filtered_kept_delta.csv"
+BASE_DIR = Path(__file__).resolve().parent
+IN_CSV = BASE_DIR / "OUTPUT_STAGE2" / "stage2_filtered_kept_delta.csv"
 
 
-OUT_EXIT = r"C:\Users\Renuka Kolusu\TEG Business Solutions Pvt Ltd\HWAI - TEG-HealthWorks\ProviderIntel\ProviderIntel Induction\Article_summarizer\OUT_PUT_2022tocurr\stage3_exit_events.csv"
-OUT_CLOSURE = r"C:\Users\Renuka Kolusu\TEG Business Solutions Pvt Ltd\HWAI - TEG-HealthWorks\ProviderIntel\ProviderIntel Induction\Article_summarizer\OUT_PUT_2022tocurr\stage3_closure_events.csv"
-OUT_NO = r"C:\Users\Renuka Kolusu\TEG Business Solutions Pvt Ltd\HWAI - TEG-HealthWorks\ProviderIntel\ProviderIntel Induction\Article_summarizer\OUT_PUT_2022tocurr\stage3_no.csv"
-OUT_SKIPPED = r"C:\Users\Renuka Kolusu\TEG Business Solutions Pvt Ltd\HWAI - TEG-HealthWorks\ProviderIntel\ProviderIntel Induction\Article_summarizer\OUT_PUT_2022tocurr\stage3_skipped_run.csv"
-OUT_ERROR = r"C:\Users\Renuka Kolusu\TEG Business Solutions Pvt Ltd\HWAI - TEG-HealthWorks\ProviderIntel\ProviderIntel Induction\Article_summarizer\OUT_PUT_2022tocurr\stage3_error.csv"
+OUTPUT_DIR = BASE_DIR / "OUTPUT_STAGE3"
+OUTPUT_DIR.mkdir(exist_ok=True)
 
-load_dotenv(
-    r"C:\Users\Renuka Kolusu\TEG Business Solutions Pvt Ltd\HWAI - TEG-HealthWorks\ProviderIntel\ProviderIntel Induction\Article_summarizer\Codes\.env"
-)
+OUT_EXIT = OUTPUT_DIR / "stage3_exit_events.csv"
+OUT_CLOSURE = OUTPUT_DIR / "stage3_closure_events.csv"
+OUT_NO = OUTPUT_DIR / "stage3_no.csv"
+OUT_SKIPPED = OUTPUT_DIR / "stage3_skipped_run.csv"
+OUT_ERROR = OUTPUT_DIR / "stage3_error.csv"
+
+load_dotenv(BASE_DIR / ".env")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
@@ -244,13 +249,14 @@ def get_url_from_row(row: pd.Series, df_cols: List[str]) -> str:
 
 def make_driver():
     options = Options()
-    # options.add_argument("--headless=new")  # keep off first
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-notifications")
+    # REQUIRED for GitHub Actions
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    return webdriver.Chrome(options=options)
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-notifications")
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=options)
 
 
 def fetch_article_text_selenium(url: str, driver) -> Tuple[str, Optional[str]]:
