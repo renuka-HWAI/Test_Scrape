@@ -42,15 +42,15 @@ jobs:
 
       # Run Stage 1
       - name: Run Stage 1
-        run: python stage1.py
+        run: python stage1_code.py
 
       # Run Stage 2
       - name: Run Stage 2
-        run: python stage2.py
+        run: python stage2_code.py
 
       # Run Stage 3
       - name: Run Stage 3
-        run: python stage3.py
+        run: python stage3_code.py
 
       # Commit outputs (CRITICAL for persistence)
       - name: Commit and Push Outputs
