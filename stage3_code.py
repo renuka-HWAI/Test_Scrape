@@ -24,7 +24,6 @@ from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 import os
 from pathlib import Path
 
@@ -52,8 +51,6 @@ OUT_CLOSURE = OUTPUT_DIR / "stage3_closure_events.csv"
 OUT_NO = OUTPUT_DIR / "stage3_no.csv"
 OUT_SKIPPED = OUTPUT_DIR / "stage3_skipped_run.csv"
 OUT_ERROR = OUTPUT_DIR / "stage3_error.csv"
-
-load_dotenv(BASE_DIR / ".env")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
