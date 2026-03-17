@@ -1,22 +1,27 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Mar 17 14:15:43 2026
-
-@author: Sherwin Mathias
-"""
-
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-url = "https://example.com"
+# Use a reliable test website
+url = "https://httpbin.org/html"
 
-response = requests.get(url)
-soup = BeautifulSoup(response.text, "html.parser")
+try:
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()  # Raises error for bad status codes
 
-title = soup.find("h1").text
+    soup = BeautifulSoup(response.text, "html.parser")
 
-with open("output.txt", "a") as f:
-    f.write(f"{datetime.now()} - {title}\n")
+    # This page has an <h1> tag
+    title = soup.find("h1").text.strip()
 
-print("Done:", title)
+    output = f"{datetime.now()} - {title}"
+
+    # Save output
+    with open("output.txt", "a") as f:
+        f.write(output + "\n")
+
+    print("✅ Scraping successful:")
+    print(output)
+
+except requests.exceptions.RequestException as e:
+    print("❌ Error occurred:", e)
