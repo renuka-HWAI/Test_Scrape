@@ -91,7 +91,7 @@ DELTA_CSV = str(OUT_DIR / "listings_2022tocurr_new_delta.csv")
 MAX_PAGES = 3000
 SLEEP_SEC = 4
 TIMEOUT = 45
-SELENIUM_WAIT_SEC = 20
+SELENIUM_WAIT_SEC = 50
 
 # Used only if master file does not exist yet
 DEFAULT_CUTOFF_DATE = date(2022, 1, 1)
@@ -278,25 +278,51 @@ def fetch_page_candidates(base_url: str, page: int) -> Tuple[Optional[str], Opti
 # ============================
 def fetch_finance_page_selenium(driver, page_url: str) -> Tuple[Optional[str], Optional[str]]:
     try:
+        driver.get("https://www.beckershospitalreview.com/")
+        time.sleep(3)
+
         driver.get(page_url)
 
-        WebDriverWait(driver, SELENIUM_WAIT_SEC).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        WebDriverWait(driver, 35).until(
+            lambda d: (
+                len(d.find_elements(By.CSS_SELECTOR, "article.bh-card")) > 0
+                or len(d.find_elements(By.CSS_SELECTOR, "h2 a, h3 a, h4 a")) > 10
+            )
         )
-        time.sleep(5)
 
+        time.sleep(8)
         html = driver.page_source
-        blocked_signals = [
-        "Please enable JS and disable any ad blocker",
-        "data-cfasync",
-        "var dd=",
-        "cf-chl",
-      "challenge-platform",]
 
+        blocked_signals = [
+            "Please enable JS and disable any ad blocker",
+            "data-cfasync",
+            "var dd=",
+            "cf-chl",
+            "challenge-platform",
+        ]
         if any(sig in html for sig in blocked_signals):
             return None, "Blocked by anti-bot challenge"
 
         return html, None
+
+    except Exception as e:
+        html = ""
+        try:
+            html = driver.page_source
+        except Exception:
+            pass
+
+        blocked_signals = [
+            "Please enable JS and disable any ad blocker",
+            "data-cfasync",
+            "var dd=",
+            "cf-chl",
+            "challenge-platform",
+        ]
+        if any(sig in html for sig in blocked_signals):
+            return None, "Blocked by anti-bot challenge"
+
+        return None, f"Selenium {type(e).__name__}: {e}"
 
     except Exception as e:
         return None, f"Selenium {type(e).__name__}: {e}"
