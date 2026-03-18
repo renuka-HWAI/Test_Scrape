@@ -1,24 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-STAGE 1 — INCREMENTAL + MASTER + DELTA (GitHub-friendly, simple state files)
+STAGE 1 — INCREMENTAL + MERGED + DELTA
+HYBRID VERSION:
+- Becker Payer sections -> requests
+- Becker Hospital Review finance -> Selenium
 
 What this version does:
-1. Reads last scraped datetime from a small txt file
-2. Reads already-seen URLs from a small txt file
-3. Crawls Becker sections incrementally
-4. Keeps only truly new rows in DELTA_CSV
-5. Appends/merges rows into MASTER CSV
-6. Updates:
-      - stage1_last_scraped_dt.txt
-      - stage1_seen_urls.txt
+1. Reads previous Stage-1 merged CSV
+2. Uses latest published_dt in merged CSV as watermark
+3. Crawls section pages incrementally
+4. Dedupes merged rows by:
+      (normalized_title + published_date_YYYYMMDD)
+5. If same article appears in multiple sections,
+   keeps them in ONE row with comma-separated unique values:
+      - sources
+      - sections
+      - urls
+6. Writes:
+      - OUT_CSV   = merged master history
+      - DELTA_CSV = only truly new rows from this run
 
-Outputs:
-- stage1_master.csv   = cumulative master history
-- stage1_delta.csv    = only new rows from current run
-
-State files:
-- stage1_last_scraped_dt.txt
-- stage1_seen_urls.txt
+Important behavior:
+- Each scheduled run reads the same merged CSV,
+  gets the latest published date, and fetches only newer rows.
+- Finance archive is fetched with Selenium because requests gets blocked.
 """
 
 from __future__ import annotations
@@ -26,9 +31,8 @@ from __future__ import annotations
 import csv
 import re
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
@@ -36,6 +40,12 @@ from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 
 # ============================
@@ -51,7 +61,7 @@ BASE_SECTIONS = [
     ("https://www.beckershospitalreview.com/finance/", "Beckers Hospital Review", "finance"),
 ]
 
-FINANCE_RSS_URL = "https://news.google.com/rss/search?q=site:beckershospitalreview.com/finance"
+USE_SELENIUM_FOR_FINANCE = True
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -75,16 +85,16 @@ BASE_DIR = Path(__file__).resolve().parent
 OUT_DIR = BASE_DIR / "OUTPUT_STAGE1"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-MASTER_CSV = OUT_DIR / "stage1_master.csv"
-DELTA_CSV = OUT_DIR / "stage1_delta.csv"
-LAST_SCRAPED_FILE = OUT_DIR / "stage1_last_scraped_dt.txt"
-SEEN_URLS_FILE = OUT_DIR / "stage1_seen_urls.txt"
+OUT_CSV = str(OUT_DIR / "listings_2022tocurr_merged.csv")
+DELTA_CSV = str(OUT_DIR / "listings_2022tocurr_new_delta.csv")
 
 MAX_PAGES = 3000
 SLEEP_SEC = 4
 TIMEOUT = 45
+SELENIUM_WAIT_SEC = 20
 
-DEFAULT_CUTOFF_DT = datetime(2022, 1, 1, 0, 0, 0)
+# Used only if master file does not exist yet
+DEFAULT_CUTOFF_DATE = date(2022, 1, 1)
 
 
 # ============================
@@ -106,9 +116,17 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 
-# ============================
-# HELPERS
-# ============================
+def make_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    return webdriver.Chrome(options=options)
+
+
 def warm_up_session():
     warm_urls = [
         "https://www.beckerspayer.com/",
@@ -123,6 +141,9 @@ def warm_up_session():
             pass
 
 
+# ============================
+# URL NORMALIZE
+# ============================
 def clean_url(url: str) -> str:
     p = urlparse(url)
     q = [
@@ -140,6 +161,9 @@ def normalize_url(base_url: str, href: str) -> str:
     return clean_url(urljoin(base_url, href))
 
 
+# ============================
+# TEXT NORMALIZATION
+# ============================
 def normalize_title(title: str) -> str:
     if not title:
         return ""
@@ -160,6 +184,9 @@ def normalize_pub_date(published_dt: Optional[str]) -> str:
         return "UNKNOWN"
 
 
+# ============================
+# DATE PARSING
+# ============================
 def parse_date_loose(text: str) -> Optional[datetime]:
     if not text:
         return None
@@ -184,116 +211,7 @@ def parse_iso_any(dt_str: str) -> Optional[datetime]:
 
 
 # ============================
-# STATE FILE HELPERS
-# ============================
-def read_last_scraped_dt() -> datetime:
-    if not LAST_SCRAPED_FILE.exists():
-        return DEFAULT_CUTOFF_DT
-    try:
-        txt = LAST_SCRAPED_FILE.read_text(encoding="utf-8").strip()
-        if not txt:
-            return DEFAULT_CUTOFF_DT
-        dt = date_parser.parse(txt)
-        return dt
-    except Exception:
-        return DEFAULT_CUTOFF_DT
-
-
-def write_last_scraped_dt(dt: datetime):
-    LAST_SCRAPED_FILE.write_text(dt.isoformat(), encoding="utf-8")
-
-
-def read_seen_urls() -> set:
-    if not SEEN_URLS_FILE.exists():
-        return set()
-    try:
-        return {
-            line.strip()
-            for line in SEEN_URLS_FILE.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        }
-    except Exception:
-        return set()
-
-
-def write_seen_urls(urls: set):
-    ordered = sorted(urls)
-    SEEN_URLS_FILE.write_text("\n".join(ordered), encoding="utf-8")
-
-
-# ============================
-# MASTER CSV HELPERS
-# ============================
-def load_existing_master_rows(master_csv: Path) -> Dict[Tuple[str, str], Dict[str, str]]:
-    merged: Dict[Tuple[str, str], Dict[str, str]] = {}
-
-    if not master_csv.exists():
-        return merged
-
-    try:
-        with open(master_csv, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                title = (r.get("title") or "").strip()
-                published_dt = (r.get("published_dt") or "").strip()
-                sources = (r.get("sources") or "").strip()
-                sections = (r.get("sections") or "").strip()
-                urls = (r.get("urls") or "").strip()
-
-                tkey = normalize_title(title)
-                dkey = normalize_pub_date(published_dt if published_dt else None)
-                mkey = (tkey, dkey)
-
-                merged[mkey] = {
-                    "title": title,
-                    "published_dt": published_dt,
-                    "sources": sources,
-                    "sections": sections,
-                    "urls": urls,
-                }
-    except Exception:
-        pass
-
-    return merged
-
-
-def merge_csv_values(old_val: str, new_val: str) -> str:
-    old_items = [x.strip() for x in old_val.split(",") if x.strip()] if old_val else []
-    new_items = [x.strip() for x in new_val.split(",") if x.strip()] if new_val else []
-
-    combined = []
-    seen = set()
-
-    for item in old_items + new_items:
-        if item not in seen:
-            seen.add(item)
-            combined.append(item)
-
-    return ", ".join(combined)
-
-
-def add_to_merged(merged: Dict[Tuple[str, str], Dict[str, str]], it: Listing):
-    tkey = normalize_title(it.title)
-    dkey = normalize_pub_date(it.published_dt)
-    mkey = (tkey, dkey)
-
-    if mkey not in merged:
-        merged[mkey] = {
-            "title": it.title,
-            "published_dt": it.published_dt or "",
-            "sources": it.source,
-            "sections": it.section,
-            "urls": it.url,
-        }
-        return
-
-    merged[mkey]["sources"] = merge_csv_values(merged[mkey]["sources"], it.source)
-    merged[mkey]["sections"] = merge_csv_values(merged[mkey]["sections"], it.section)
-    merged[mkey]["urls"] = merge_csv_values(merged[mkey]["urls"], it.url)
-
-
-# ============================
-# FETCH
+# REQUESTS FETCH
 # ============================
 def fetch_html(url: str) -> Tuple[Optional[str], Optional[str]]:
     last_err = None
@@ -335,50 +253,55 @@ def fetch_page_candidates(base_url: str, page: int) -> Tuple[Optional[str], Opti
     return None, last_err, candidates[-1] if candidates else None
 
 
-def fetch_finance_rss_items() -> List[Tuple[str, str, Optional[datetime]]]:
+# ============================
+# SELENIUM FINANCE FETCH
+# ============================
+def fetch_finance_page_selenium(driver, page_url: str) -> Tuple[Optional[str], Optional[str]]:
     try:
-        r = session.get(FINANCE_RSS_URL, timeout=TIMEOUT)
-        if r.status_code != 200:
-            print(f"  [finance rss error] HTTP {r.status_code}")
-            return []
+        driver.get(page_url)
 
-        root = ET.fromstring(r.text)
-        items = []
-        seen = set()
+        WebDriverWait(driver, SELENIUM_WAIT_SEC).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        time.sleep(5)
 
-        for item in root.findall(".//item"):
-            title = (item.findtext("title") or "").strip()
-            link = (item.findtext("link") or "").strip()
-            pub_date = (item.findtext("pubDate") or "").strip()
+        html = driver.page_source
+        if "Please enable JS and disable any ad blocker" in html:
+            return None, "Blocked by anti-bot challenge"
 
-            if not title or not link:
-                continue
-
-            title = re.sub(
-                r"\s*-\s*Becker'?s?\s+Hospital\s+Review\s*$",
-                "",
-                title,
-                flags=re.IGNORECASE
-            )
-
-            pub = parse_date_loose(pub_date) if pub_date else None
-
-            key = (title.lower(), link.lower())
-            if key in seen:
-                continue
-            seen.add(key)
-
-            items.append((title, link, pub))
-
-        return items
+        return html, None
 
     except Exception as e:
-        print(f"  [finance rss exception] {type(e).__name__}: {e}")
-        return []
+        return None, f"Selenium {type(e).__name__}: {e}"
+
+
+def fetch_finance_page_candidates_selenium(driver, base_url: str, page: int):
+    if page == 1:
+        candidates = [
+            base_url,
+            f"{base_url.rstrip('/')}/",
+            f"{base_url.rstrip('/')}/page/1/",
+        ]
+    else:
+        candidates = [
+            f"{base_url.rstrip('/')}/page/{page}/",
+        ]
+
+    seen = set()
+    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+    last_err = None
+    for candidate in candidates:
+        html, err = fetch_finance_page_selenium(driver, candidate)
+        if html:
+            return html, None, candidate
+        last_err = err
+
+    return None, last_err, candidates[-1] if candidates else None
 
 
 # ============================
-# PARSING
+# LISTING PARSE
 # ============================
 def extract_bhr_cards(soup: BeautifulSoup):
     return soup.find_all("article", class_="bh-card")
@@ -444,6 +367,9 @@ def parse_generic_listing(soup: BeautifulSoup, base_url: str):
     return results
 
 
+# ============================
+# ARTICLE DATE FALLBACK
+# ============================
 def extract_article_date(article_url: str) -> Tuple[Optional[datetime], Optional[str]]:
     html, err = fetch_html(article_url)
     if not html:
@@ -468,52 +394,273 @@ def extract_article_date(article_url: str) -> Tuple[Optional[datetime], Optional
 
 
 # ============================
+# MASTER READ HELPERS
+# ============================
+def read_existing_outcsv(out_csv: str) -> Tuple[Optional[date], set]:
+    existing_urls = set()
+    max_dt: Optional[datetime] = None
+
+    try:
+        with open(out_csv, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                urls_field = (r.get("urls") or "").strip()
+                if urls_field:
+                    for u in urls_field.split(","):
+                        u = u.strip()
+                        if u:
+                            existing_urls.add(u)
+
+                s = (r.get("published_dt") or "").strip()
+                if not s:
+                    continue
+                try:
+                    dt = date_parser.parse(s)
+                    if max_dt is None or dt > max_dt:
+                        max_dt = dt
+                except Exception:
+                    continue
+
+        return (max_dt.date() if max_dt else None), existing_urls
+
+    except Exception:
+        return None, set()
+
+
+def load_existing_merged_rows(out_csv: str) -> Dict[Tuple[str, str], Dict[str, str]]:
+    merged: Dict[Tuple[str, str], Dict[str, str]] = {}
+    try:
+        with open(out_csv, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                title = (r.get("title") or "").strip()
+                published_dt = (r.get("published_dt") or "").strip()
+                sources = (r.get("sources") or "").strip()
+                sections = (r.get("sections") or "").strip()
+                urls = (r.get("urls") or "").strip()
+
+                tkey = normalize_title(title)
+                dkey = normalize_pub_date(published_dt if published_dt else None)
+                mkey = (tkey, dkey)
+
+                merged[mkey] = {
+                    "title": title,
+                    "published_dt": published_dt,
+                    "sources": sources,
+                    "sections": sections,
+                    "urls": urls,
+                }
+    except Exception:
+        pass
+    return merged
+
+
+# ============================
+# MERGE HELPERS
+# ============================
+def merge_csv_values(old_val: str, new_val: str) -> str:
+    old_items = [x.strip() for x in old_val.split(",") if x.strip()] if old_val else []
+    new_items = [x.strip() for x in new_val.split(",") if x.strip()] if new_val else []
+
+    combined = []
+    seen = set()
+
+    for item in old_items + new_items:
+        if item not in seen:
+            seen.add(item)
+            combined.append(item)
+
+    return ", ".join(combined)
+
+
+def add_to_merged(merged: Dict[Tuple[str, str], Dict[str, str]], it: Listing):
+    tkey = normalize_title(it.title)
+    dkey = normalize_pub_date(it.published_dt)
+    mkey = (tkey, dkey)
+
+    if mkey not in merged:
+        merged[mkey] = {
+            "title": it.title,
+            "published_dt": it.published_dt or "",
+            "sources": it.source,
+            "sections": it.section,
+            "urls": it.url,
+        }
+        return
+
+    merged[mkey]["sources"] = merge_csv_values(merged[mkey]["sources"], it.source)
+    merged[mkey]["sections"] = merge_csv_values(merged[mkey]["sections"], it.section)
+    merged[mkey]["urls"] = merge_csv_values(merged[mkey]["urls"], it.url)
+
+
+# ============================
 # MAIN
 # ============================
 def main():
     t0 = time.time()
 
-    last_scraped_dt = read_last_scraped_dt()
-    seen_urls = read_seen_urls()
-    merged = load_existing_master_rows(MASTER_CSV)
+    watermark, existing_urls = read_existing_outcsv(OUT_CSV)
+    if watermark:
+        print(f"[watermark] Latest published_dt in previous OUT_CSV = {watermark}")
+    else:
+        watermark = DEFAULT_CUTOFF_DATE
+        print(f"[watermark] No previous OUT_CSV found -> using default {watermark}")
 
-    print(f"[watermark] Last scraped datetime = {last_scraped_dt.isoformat()}")
-    print(f"[state] Seen URLs loaded = {len(seen_urls)}")
+    merged = load_existing_merged_rows(OUT_CSV)
 
     warm_up_session()
 
-    delta_rows: List[Dict[str, str]] = []
-    max_dt_seen_this_run = last_scraped_dt
+    finance_driver = None
+    if USE_SELENIUM_FOR_FINANCE:
+        try:
+            finance_driver = make_driver()
+            print("[finance] Selenium driver started successfully")
+        except Exception as e:
+            print(f"[warn] Finance Selenium driver could not be started: {e}")
 
+    delta_rows: List[Dict[str, str]] = []
     section_stats: Dict[str, Dict[str, int]] = {}
 
-    for base_url, source, section in BASE_SECTIONS:
-        key = f"{source} | {section}"
-        section_stats[key] = {
-            "pages": 0,
-            "found": 0,
-            "new_kept": 0,
-            "skipped_old": 0,
-            "skipped_existing_url": 0,
-            "missing_date": 0,
-            "page_errors": 0,
-            "article_date_errors": 0,
-        }
+    new_kept_total = 0
+    new_added_urls = 0
 
-        print(f"\n[crawl] {key}")
+    try:
+        for base_url, source, section in BASE_SECTIONS:
+            key = f"{source} | {section}"
+            section_stats[key] = {
+                "pages": 0,
+                "found": 0,
+                "new_kept": 0,
+                "skipped_old": 0,
+                "missing_date": 0,
+                "page_errors": 0,
+                "article_date_errors": 0,
+            }
 
-        # ----------------------------
-        # FINANCE
-        # ----------------------------
-        if section == "finance":
-            items: List[Tuple[str, str, Optional[datetime]]] = []
+            print(f"\n[crawl] {key}")
 
-            html, err = fetch_html(base_url)
-            if html:
+            # ============================
+            # FINANCE via Selenium
+            # ============================
+            if section == "finance" and USE_SELENIUM_FOR_FINANCE:
+                page = 1
+                stop_section = False
+
+                while not stop_section and page <= MAX_PAGES:
+                    if finance_driver is None:
+                        section_stats[key]["page_errors"] += 1
+                        print("  [finance error] Selenium driver unavailable")
+                        break
+
+                    html, err, used_url = fetch_finance_page_candidates_selenium(finance_driver, base_url, page)
+
+                    if not html:
+                        section_stats[key]["page_errors"] += 1
+                        print(f"  [finance page error] {used_url} -> {err}")
+                        break
+
+                    section_stats[key]["pages"] += 1
+                    soup = BeautifulSoup(html, "html.parser")
+
+                    items: List[Tuple[str, str, Optional[datetime]]] = []
+                    cards = extract_bhr_cards(soup)
+
+                    if cards:
+                        for c in cards:
+                            parsed = parse_bhr_card(c, base_url)
+                            if parsed:
+                                items.append(parsed)
+                    else:
+                        items.extend(parse_generic_listing(soup, base_url))
+
+                    if not items:
+                        break
+
+                    section_stats[key]["found"] += len(items)
+
+                    page_dates: List[date] = []
+                    page_all_have_dates = True
+                    resolved_items: List[Tuple[str, str, Optional[datetime]]] = []
+
+                    for title, url, pub in items:
+                        if pub is None:
+                            page_all_have_dates = False
+                            section_stats[key]["missing_date"] += 1
+
+                        if pub is not None:
+                            page_dates.append(pub.date())
+
+                        resolved_items.append((title, url, pub))
+
+                    if page_all_have_dates and page_dates:
+                        newest_on_page = max(page_dates)
+                        if newest_on_page < watermark:
+                            stop_section = True
+
+                    for title, url, pub in resolved_items:
+                        it = Listing(
+                            source=source,
+                            section=section,
+                            title=title,
+                            url=url,
+                            published_dt=pub.isoformat() if pub else None,
+                        )
+
+                        if pub is not None and pub.date() < watermark:
+                            section_stats[key]["skipped_old"] += 1
+                            add_to_merged(merged, it)
+                            continue
+
+                        if url in existing_urls:
+                            add_to_merged(merged, it)
+                            continue
+
+                        existing_urls.add(url)
+                        new_added_urls += 1
+                        add_to_merged(merged, it)
+
+                        delta_rows.append({
+                            "title": it.title,
+                            "published_dt": it.published_dt or "",
+                            "sources": it.source,
+                            "sections": it.section,
+                            "urls": it.url,
+                        })
+
+                        section_stats[key]["new_kept"] += 1
+                        new_kept_total += 1
+
+                    page += 1
+                    time.sleep(SLEEP_SEC)
+
+                s = section_stats[key]
+                print(
+                    f"  [section summary] pages={s['pages']} found={s['found']} new_kept={s['new_kept']} "
+                    f"skipped_old={s['skipped_old']} missing_date={s['missing_date']} "
+                    f"page_errors={s['page_errors']} article_date_errors={s['article_date_errors']}"
+                )
+                continue
+
+            # ============================
+            # NON-FINANCE via requests
+            # ============================
+            page = 1
+            stop_section = False
+
+            while not stop_section and page <= MAX_PAGES:
+                html, err, used_url = fetch_page_candidates(base_url, page)
+
+                if not html:
+                    section_stats[key]["page_errors"] += 1
+                    print(f"  [page error] {used_url} -> {err}")
+                    break
+
                 section_stats[key]["pages"] += 1
                 soup = BeautifulSoup(html, "html.parser")
 
+                items: List[Tuple[str, str, Optional[datetime]]] = []
                 cards = extract_bhr_cards(soup)
+
                 if cards:
                     for c in cards:
                         parsed = parse_bhr_card(c, base_url)
@@ -523,211 +670,105 @@ def main():
                     items.extend(parse_generic_listing(soup, base_url))
 
                 if not items:
-                    print("  [finance direct] No items parsed from direct page, trying RSS fallback...")
-                    items = fetch_finance_rss_items()
-                    if not items:
-                        section_stats[key]["page_errors"] += 1
+                    break
 
                 section_stats[key]["found"] += len(items)
 
-            else:
-                section_stats[key]["page_errors"] += 1
-                print(f"  [finance direct blocked] {base_url} -> {err}")
-                print("  [finance fallback] Using Google News RSS...")
-                items = fetch_finance_rss_items()
-                section_stats[key]["found"] += len(items)
+                page_dates: List[date] = []
+                page_all_have_dates = True
+                resolved_items: List[Tuple[str, str, Optional[datetime]]] = []
 
-            resolved_items: List[Tuple[str, str, Optional[datetime]]] = []
-
-            for title, url, pub in items:
-                if pub is None:
-                    got, _ = extract_article_date(url)
-                    time.sleep(SLEEP_SEC)
-                    pub = got
+                for title, url, pub in items:
                     if pub is None:
-                        section_stats[key]["missing_date"] += 1
-                        section_stats[key]["article_date_errors"] += 1
+                        got, _ = extract_article_date(url)
+                        time.sleep(SLEEP_SEC)
+                        pub = got
+                        if pub is None:
+                            page_all_have_dates = False
+                            section_stats[key]["missing_date"] += 1
+                            section_stats[key]["article_date_errors"] += 1
 
-                resolved_items.append((title, url, pub))
+                    if pub is not None:
+                        page_dates.append(pub.date())
 
-            for title, url, pub in resolved_items:
-                it = Listing(
-                    title=title,
-                    url=url,
-                    published_dt=pub.isoformat() if pub else None,
-                    source=source,
-                    section=section,
-                )
+                    resolved_items.append((title, url, pub))
 
-                # older than last watermark -> skip
-                if pub is not None and pub < last_scraped_dt:
-                    section_stats[key]["skipped_old"] += 1
+                if page_all_have_dates and page_dates:
+                    newest_on_page = max(page_dates)
+                    if newest_on_page < watermark:
+                        stop_section = True
+
+                for title, url, pub in resolved_items:
+                    it = Listing(
+                        source=source,
+                        section=section,
+                        title=title,
+                        url=url,
+                        published_dt=pub.isoformat() if pub else None,
+                    )
+
+                    if pub is not None and pub.date() < watermark:
+                        section_stats[key]["skipped_old"] += 1
+                        add_to_merged(merged, it)
+                        continue
+
+                    if url in existing_urls:
+                        add_to_merged(merged, it)
+                        continue
+
+                    existing_urls.add(url)
+                    new_added_urls += 1
                     add_to_merged(merged, it)
-                    continue
 
-                # already seen url -> skip
-                if url in seen_urls:
-                    section_stats[key]["skipped_existing_url"] += 1
-                    add_to_merged(merged, it)
-                    continue
+                    delta_rows.append({
+                        "title": it.title,
+                        "published_dt": it.published_dt or "",
+                        "sources": it.source,
+                        "sections": it.section,
+                        "urls": it.url,
+                    })
 
-                seen_urls.add(url)
-                add_to_merged(merged, it)
+                    section_stats[key]["new_kept"] += 1
+                    new_kept_total += 1
 
-                delta_rows.append({
-                    "title": it.title,
-                    "published_dt": it.published_dt or "",
-                    "sources": it.source,
-                    "sections": it.section,
-                    "urls": it.url,
-                })
-
-                section_stats[key]["new_kept"] += 1
-
-                if pub is not None and pub > max_dt_seen_this_run:
-                    max_dt_seen_this_run = pub
+                page += 1
+                time.sleep(SLEEP_SEC)
 
             s = section_stats[key]
             print(
                 f"  [section summary] pages={s['pages']} found={s['found']} new_kept={s['new_kept']} "
-                f"skipped_old={s['skipped_old']} skipped_existing_url={s['skipped_existing_url']} "
-                f"missing_date={s['missing_date']} page_errors={s['page_errors']} "
-                f"article_date_errors={s['article_date_errors']}"
+                f"skipped_old={s['skipped_old']} missing_date={s['missing_date']} "
+                f"page_errors={s['page_errors']} article_date_errors={s['article_date_errors']}"
             )
-            continue
 
-        # ----------------------------
-        # NON-FINANCE
-        # ----------------------------
-        page = 1
-        stop_section = False
+    finally:
+        if finance_driver is not None:
+            try:
+                finance_driver.quit()
+            except Exception:
+                pass
 
-        while not stop_section and page <= MAX_PAGES:
-            html, err, used_url = fetch_page_candidates(base_url, page)
-
-            if not html:
-                section_stats[key]["page_errors"] += 1
-                print(f"  [page error] {used_url} -> {err}")
-                break
-
-            section_stats[key]["pages"] += 1
-            soup = BeautifulSoup(html, "html.parser")
-
-            items: List[Tuple[str, str, Optional[datetime]]] = []
-            cards = extract_bhr_cards(soup)
-
-            if cards:
-                for c in cards:
-                    parsed = parse_bhr_card(c, base_url)
-                    if parsed:
-                        items.append(parsed)
-            else:
-                items.extend(parse_generic_listing(soup, base_url))
-
-            if not items:
-                break
-
-            section_stats[key]["found"] += len(items)
-
-            page_dts: List[datetime] = []
-            page_all_have_dates = True
-            resolved_items: List[Tuple[str, str, Optional[datetime]]] = []
-
-            for title, url, pub in items:
-                if pub is None:
-                    got, _ = extract_article_date(url)
-                    time.sleep(SLEEP_SEC)
-                    pub = got
-                    if pub is None:
-                        page_all_have_dates = False
-                        section_stats[key]["missing_date"] += 1
-                        section_stats[key]["article_date_errors"] += 1
-
-                if pub is not None:
-                    page_dts.append(pub)
-
-                resolved_items.append((title, url, pub))
-
-            # stop when page is fully not newer than watermark
-            if page_all_have_dates and page_dts:
-                newest_on_page = max(page_dts)
-                if newest_on_page < last_scraped_dt:
-                    stop_section = True
-
-            for title, url, pub in resolved_items:
-                it = Listing(
-                    title=title,
-                    url=url,
-                    published_dt=pub.isoformat() if pub else None,
-                    source=source,
-                    section=section,
-                )
-
-                if pub is not None and pub < last_scraped_dt:
-                    section_stats[key]["skipped_old"] += 1
-                    add_to_merged(merged, it)
-                    continue
-
-                if url in seen_urls:
-                    section_stats[key]["skipped_existing_url"] += 1
-                    add_to_merged(merged, it)
-                    continue
-
-                seen_urls.add(url)
-                add_to_merged(merged, it)
-
-                delta_rows.append({
-                    "title": it.title,
-                    "published_dt": it.published_dt or "",
-                    "sources": it.source,
-                    "sections": it.section,
-                    "urls": it.url,
-                })
-
-                section_stats[key]["new_kept"] += 1
-
-                if pub is not None and pub > max_dt_seen_this_run:
-                    max_dt_seen_this_run = pub
-
-            page += 1
-            time.sleep(SLEEP_SEC)
-
-        s = section_stats[key]
-        print(
-            f"  [section summary] pages={s['pages']} found={s['found']} new_kept={s['new_kept']} "
-            f"skipped_old={s['skipped_old']} skipped_existing_url={s['skipped_existing_url']} "
-            f"missing_date={s['missing_date']} page_errors={s['page_errors']} "
-            f"article_date_errors={s['article_date_errors']}"
-        )
-
-    # write master
-    with open(MASTER_CSV, "w", newline="", encoding="utf-8-sig") as f:
+    with open(OUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=["title", "published_dt", "sources", "sections", "urls"])
         writer.writeheader()
         for row in merged.values():
             writer.writerow(row)
 
-    # write delta
     with open(DELTA_CSV, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=["title", "published_dt", "sources", "sections", "urls"])
         writer.writeheader()
         for row in delta_rows:
             writer.writerow(row)
 
-    # update state files
-    write_seen_urls(seen_urls)
-    write_last_scraped_dt(max_dt_seen_this_run)
-
     t1 = time.time()
     total_seconds = t1 - t0
 
     print("\n==============================")
     print("[done] Stage 1 incremental complete")
-    print(f"New rows kept in this run: {len(delta_rows)}")
-    print(f"Master file: {MASTER_CSV}")
-    print(f"Delta file: {DELTA_CSV}")
-    print(f"Last scraped datetime saved: {max_dt_seen_this_run.isoformat()}")
-    print(f"Seen URLs saved: {len(seen_urls)}")
+    print(f"New rows kept in this run: {new_kept_total}")
+    print(f"New unique URLs added: {new_added_urls}")
+    print(f"Output (merged master) file: {OUT_CSV}")
+    print(f"Output (delta new-only) file: {DELTA_CSV}")
     print(f"Runtime: {total_seconds:.2f} sec ({total_seconds/60:.2f} min)")
     print("==============================\n")
 
@@ -737,9 +778,9 @@ if __name__ == "__main__":
 
     import pandas as pd
 
-    df = pd.read_csv(MASTER_CSV)
+    df = pd.read_csv(OUT_CSV)
 
-    print("Total rows in master file:", len(df))
+    print("Total rows in merged file:", len(df))
     print("Unique titles:", df["title"].nunique())
     print("Unique URLs:", df["urls"].nunique())
 
