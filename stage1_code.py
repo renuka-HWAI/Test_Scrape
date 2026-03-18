@@ -111,18 +111,18 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 
-# def warm_up_session():
-#     warm_urls = [
-#         "https://www.beckerspayer.com/",
-#         "https://www.beckerspayer.com/payer/",
-#         "https://www.beckershospitalreview.com/",
-#     ]
-#     for u in warm_urls:
-#         try:
-#             session.get(u, timeout=TIMEOUT)
-#             time.sleep(2)
-#         except Exception:
-#             pass
+def warm_up_session():
+    warm_urls = [
+        "https://www.beckerspayer.com/",
+        "https://www.beckerspayer.com/payer/",
+        "https://www.beckershospitalreview.com/",
+    ]
+    for u in warm_urls:
+        try:
+            session.get(u, timeout=TIMEOUT)
+            time.sleep(2)
+        except Exception:
+            pass
 
 
 # ============================
