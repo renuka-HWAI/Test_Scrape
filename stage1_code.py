@@ -73,7 +73,7 @@ HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "Referer": "https://www.google.com/",
     "Upgrade-Insecure-Requests": "1",
@@ -221,13 +221,30 @@ def fetch_html(url: str) -> Tuple[Optional[str], Optional[str]]:
     for attempt in range(5):
         try:
             r = session.get(url, timeout=TIMEOUT, allow_redirects=True)
+
             if r.status_code == 200:
-                return r.text, None
+                # safer decoding for GitHub/runtime differences
+                content_type = r.headers.get("Content-Type", "")
+                if "text" in content_type.lower() or "html" in content_type.lower():
+                    try:
+                        r.encoding = r.apparent_encoding or r.encoding or "utf-8"
+                    except Exception:
+                        r.encoding = r.encoding or "utf-8"
+                    return r.text, None
+                else:
+                    try:
+                        text = r.content.decode("utf-8", errors="ignore")
+                    except Exception:
+                        text = r.text
+                    return text, None
+
             last_err = f"HTTP {r.status_code}"
+
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
 
         time.sleep(3 * (attempt + 1))
+
     return None, last_err
 
 
@@ -269,7 +286,15 @@ def fetch_finance_page_selenium(driver, page_url: str) -> Tuple[Optional[str], O
         time.sleep(5)
 
         html = driver.page_source
-        if "Please enable JS and disable any ad blocker" in html:
+        blocked_signals = [
+    "Please enable JS and disable any ad blocker",
+    "data-cfasync",
+    "var dd=",
+    "cf-chl",
+    "challenge-platform",
+]
+
+      if any(sig in html for sig in blocked_signals):
             return None, "Blocked by anti-bot challenge"
 
         return html, None
