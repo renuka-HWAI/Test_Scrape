@@ -287,14 +287,13 @@ def fetch_finance_page_selenium(driver, page_url: str) -> Tuple[Optional[str], O
 
         html = driver.page_source
         blocked_signals = [
-    "Please enable JS and disable any ad blocker",
-    "data-cfasync",
-    "var dd=",
-    "cf-chl",
-    "challenge-platform",
-]
+        "Please enable JS and disable any ad blocker",
+        "data-cfasync",
+        "var dd=",
+        "cf-chl",
+      "challenge-platform",]
 
-      if any(sig in html for sig in blocked_signals):
+        if any(sig in html for sig in blocked_signals):
             return None, "Blocked by anti-bot challenge"
 
         return html, None
