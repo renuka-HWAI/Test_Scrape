@@ -126,8 +126,33 @@ def make_driver():
     options.add_argument("--disable-notifications")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--lang=en-US")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/146.0.0.0 Safari/537.36"
+    )
+
     service = Service("/usr/local/bin/chromedriver")
-    return webdriver.Chrome(service=service, options=options)
+    driver = webdriver.Chrome(service=service, options=options)
+
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'platform', {
+                    get: () => 'Win32'
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+            """
+        }
+    )
+    return driver
 
 
 def warm_up_session():
@@ -278,15 +303,20 @@ def fetch_page_candidates(base_url: str, page: int) -> Tuple[Optional[str], Opti
 # ============================
 def fetch_finance_page_selenium(driver, page_url: str) -> Tuple[Optional[str], Optional[str]]:
     try:
+        # Warm up on main domain first
         driver.get("https://www.beckershospitalreview.com/")
-        time.sleep(3)
+        time.sleep(4)
 
+        # Then open finance page
         driver.get(page_url)
 
+        # Wait for likely article content, not just body
         WebDriverWait(driver, 35).until(
             lambda d: (
                 len(d.find_elements(By.CSS_SELECTOR, "article.bh-card")) > 0
                 or len(d.find_elements(By.CSS_SELECTOR, "h2 a, h3 a, h4 a")) > 10
+                or "challenge" in d.page_source.lower()
+                or "var dd=" in d.page_source
             )
         )
 
@@ -323,10 +353,6 @@ def fetch_finance_page_selenium(driver, page_url: str) -> Tuple[Optional[str], O
             return None, "Blocked by anti-bot challenge"
 
         return None, f"Selenium {type(e).__name__}: {e}"
-
-    except Exception as e:
-        return None, f"Selenium {type(e).__name__}: {e}"
-
 
 def fetch_finance_page_candidates_selenium(driver, base_url: str, page: int):
     if page == 1:
