@@ -116,6 +116,8 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 
+from selenium.webdriver.chrome.service import Service
+
 def make_driver():
     options = Options()
     options.add_argument("--headless=new")
@@ -124,7 +126,8 @@ def make_driver():
     options.add_argument("--disable-notifications")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    return webdriver.Chrome(options=options)
+    service = Service("/usr/local/bin/chromedriver")
+    return webdriver.Chrome(service=service, options=options)
 
 
 def warm_up_session():
@@ -558,7 +561,7 @@ def main():
                         section_stats[key]["page_errors"] += 1
                         print(f"  [finance page error] {used_url} -> {err}")
                         break
-
+                    print(f"  [debug] parsed items on page {page} = {len(items)}")
                     section_stats[key]["pages"] += 1
                     soup = BeautifulSoup(html, "html.parser")
 
@@ -572,7 +575,7 @@ def main():
                                 items.append(parsed)
                     else:
                         items.extend(parse_generic_listing(soup, base_url))
-
+                    print(f"  [debug-finance] parsed items on page {page} = {len(items)}")
                     if not items:
                         break
 
@@ -654,6 +657,7 @@ def main():
                     section_stats[key]["page_errors"] += 1
                     print(f"  [page error] {used_url} -> {err}")
                     break
+                print(f"  [debug] fetched {used_url} | html_len={len(html) if html else 0}")  
 
                 section_stats[key]["pages"] += 1
                 soup = BeautifulSoup(html, "html.parser")
@@ -668,7 +672,7 @@ def main():
                             items.append(parsed)
                 else:
                     items.extend(parse_generic_listing(soup, base_url))
-
+                print(f"  [debug] parsed items on page {page} = {len(items)}")
                 if not items:
                     break
 
