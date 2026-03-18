@@ -576,6 +576,7 @@ def main():
                     else:
                         items.extend(parse_generic_listing(soup, base_url))
                     print(f"  [debug-finance] parsed items on page {page} = {len(items)}")
+                    print("  [debug-finance-html-snippet]", repr(html[:500]))  
                     if not items:
                         break
 
@@ -657,7 +658,8 @@ def main():
                     section_stats[key]["page_errors"] += 1
                     print(f"  [page error] {used_url} -> {err}")
                     break
-                print(f"  [debug] fetched {used_url} | html_len={len(html) if html else 0}")  
+                print(f"  [debug] fetched {used_url} | html_len={len(html) if html else 0}")
+                print("  [debug-html-snippet]", repr(html[:500]))  
 
                 section_stats[key]["pages"] += 1
                 soup = BeautifulSoup(html, "html.parser")
