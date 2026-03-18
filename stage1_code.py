@@ -420,6 +420,23 @@ def main():
     existing_urls = set()
     merged = {}
 
+    if OUT_CSV.exists():
+    print("[load] Loading existing master...")
+    with open(OUT_CSV, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            urls = row["urls"].split(", ")
+            for u in urls:
+                it = Listing(
+                    title=row["title"],
+                    url=u,
+                    published_dt=row["published_dt"],
+                    source=row["sources"],
+                    section=row["sections"],)
+                add_to_merged(merged, it)
+                existing_urls.add(u)
+
+    print(f"[load] Loaded {len(merged)} merged rows, {len(existing_urls)} URLs")
     print(f"[watermark] Full rebuild mode from {watermark} to current date")
 
     warm_up_session()
