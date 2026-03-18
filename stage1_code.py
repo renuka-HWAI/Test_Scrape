@@ -1,28 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-STAGE 1 — FULL REBUILD (2023-01-01 to current) + MERGED + DELTA
+STAGE 1 — INCREMENTAL + MERGED + DELTA (GitHub-friendly, full datetime watermark)
 
 What this version does:
-1. Rebuilds from 2023-01-01 to current available pages
-2. Does NOT use previous OUT_CSV as watermark
-3. Dedupes merged rows by:
+1. Reads previous Stage-1 merged CSV if it exists
+2. Uses latest full published_dt in merged CSV as watermark
+3. Crawls section pages incrementally
+4. Dedupes merged rows by:
       (normalized_title + published_date_YYYYMMDD)
-4. If same article appears in multiple sections,
+5. If same article appears in multiple sections,
    keeps them in ONE row with comma-separated unique values:
       - sources
       - sections
       - urls
-5. Writes:
-      - OUT_CSV   = merged master history rebuilt fresh
-      - DELTA_CSV = same as rows found in this run
+6. Writes:
+      - OUT_CSV   = merged master history
+      - DELTA_CSV = only truly new rows from this run
 
-Finance handling:
-- First tries direct scrape from Becker finance archive page
-- If finance page is blocked (403 / fetch fail), falls back to Google News RSS
-
-Notes:
-- Since this is FULL REBUILD mode, delta = rows found in this run
-- Payer/Becker pages may still intermittently return 403; retries/slower sleep included
+Important behavior:
+- Next scheduler run will read the same master CSV,
+  get the latest full published datetime,
+  and fetch only articles newer than that.
+- Same-day new articles are NOT skipped just because date is same.
+- Finance tries direct scrape first.
+- If finance page blocks in GitHub/runtime environment,
+  it falls back to Google News RSS.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 from pathlib import Path
@@ -75,13 +77,9 @@ HEADERS = {
     "Pragma": "no-cache",
 }
 
-TODAY_STR = datetime.now().strftime("%d%b%Y")
-
-# Create output folder inside project directory
 BASE_DIR = Path(__file__).resolve().parent
-OUT_DIR = BASE_DIR / f"OUTPUT_STAGE1"
-
-OUT_DIR.mkdir(exist_ok=True)
+OUT_DIR = BASE_DIR / "OUTPUT_STAGE1"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 OUT_CSV = OUT_DIR / "stage1_master.csv"
 DELTA_CSV = OUT_DIR / "stage1_delta.csv"
@@ -89,7 +87,9 @@ DELTA_CSV = OUT_DIR / "stage1_delta.csv"
 MAX_PAGES = 3000
 SLEEP_SEC = 4
 TIMEOUT = 45
-DEFAULT_CUTOFF_DATE = date(2026, 2, 1)
+
+# Used only if master file does not exist yet
+DEFAULT_CUTOFF_DT = datetime(2022, 1, 1, 0, 0, 0)
 
 
 # ============================
@@ -152,7 +152,7 @@ def normalize_title(title: str) -> str:
     if not title:
         return ""
     t = title.strip().lower()
-    t = t.replace("â€˜", "'").replace("â€™", "'").replace("â€œ", '"').replace("â€ ", '"')
+    t = t.replace("â€˜", "'").replace("â€™", "'").replace("â€œ", '"').replace("â€�", '"')
     t = t.replace("â€“", "-").replace("â€”", "-").replace("Â", " ")
     t = re.sub(r"\s+", " ", t).strip()
     return t
@@ -373,6 +373,76 @@ def extract_article_date(article_url: str) -> Tuple[Optional[datetime], Optional
 
 
 # ============================
+# MASTER READ HELPERS
+# ============================
+def read_existing_outcsv(out_csv: Path) -> Tuple[Optional[datetime], set]:
+    existing_urls = set()
+    max_dt: Optional[datetime] = None
+
+    if not out_csv.exists():
+        return None, set()
+
+    try:
+        with open(out_csv, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                urls_field = (r.get("urls") or "").strip()
+                if urls_field:
+                    for u in urls_field.split(","):
+                        u = u.strip()
+                        if u:
+                            existing_urls.add(u)
+
+                s = (r.get("published_dt") or "").strip()
+                if not s:
+                    continue
+                try:
+                    dt = date_parser.parse(s)
+                    if max_dt is None or dt > max_dt:
+                        max_dt = dt
+                except Exception:
+                    continue
+
+        return max_dt, existing_urls
+
+    except Exception:
+        return None, set()
+
+
+def load_existing_merged_rows(out_csv: Path) -> Dict[Tuple[str, str], Dict[str, str]]:
+    merged: Dict[Tuple[str, str], Dict[str, str]] = {}
+
+    if not out_csv.exists():
+        return merged
+
+    try:
+        with open(out_csv, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                title = (r.get("title") or "").strip()
+                published_dt = (r.get("published_dt") or "").strip()
+                sources = (r.get("sources") or "").strip()
+                sections = (r.get("sections") or "").strip()
+                urls = (r.get("urls") or "").strip()
+
+                tkey = normalize_title(title)
+                dkey = normalize_pub_date(published_dt if published_dt else None)
+                mkey = (tkey, dkey)
+
+                merged[mkey] = {
+                    "title": title,
+                    "published_dt": published_dt,
+                    "sources": sources,
+                    "sections": sections,
+                    "urls": urls,
+                }
+    except Exception:
+        pass
+
+    return merged
+
+
+# ============================
 # MERGE HELPERS
 # ============================
 def merge_csv_values(old_val: str, new_val: str) -> str:
@@ -416,28 +486,14 @@ def add_to_merged(merged: Dict[Tuple[str, str], Dict[str, str]], it: Listing):
 def main():
     t0 = time.time()
 
-    watermark = DEFAULT_CUTOFF_DATE
-    existing_urls = set()
-    merged = {}
+    watermark, existing_urls = read_existing_outcsv(OUT_CSV)
+    if watermark:
+        print(f"[watermark] Latest published_dt in previous OUT_CSV = {watermark.isoformat()}")
+    else:
+        watermark = DEFAULT_CUTOFF_DT
+        print(f"[watermark] No previous OUT_CSV found -> using default {watermark.isoformat()}")
 
-    if OUT_CSV.exists():
-        print("[load] Loading existing master...")
-        with open(OUT_CSV, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                urls = row["urls"].split(", ")
-                for u in urls:
-                    it = Listing(
-                        title=row["title"],
-                        url=u,
-                        published_dt=row["published_dt"],
-                        source=row["sources"],
-                        section=row["sections"],)
-                    add_to_merged(merged, it)
-                    existing_urls.add(u)
-
-    print(f"[load] Loaded {len(merged)} merged rows, {len(existing_urls)} URLs")
-    print(f"[watermark] Full rebuild mode from {watermark} to current date")
+    merged = load_existing_merged_rows(OUT_CSV)
 
     warm_up_session()
 
@@ -457,15 +513,18 @@ def main():
             "missing_date": 0,
             "page_errors": 0,
             "article_date_errors": 0,
+            "skipped_existing_url": 0,
         }
 
         print(f"\n[crawl] {key}")
 
-        # finance special handling
+        # ============================
+        # FINANCE handling
+        # ============================
         if section == "finance":
-            html, err = fetch_html(base_url)
             items: List[Tuple[str, str, Optional[datetime]]] = []
 
+            html, err = fetch_html(base_url)
             if html:
                 section_stats[key]["pages"] += 1
                 soup = BeautifulSoup(html, "html.parser")
@@ -479,7 +538,14 @@ def main():
                 else:
                     items.extend(parse_generic_listing(soup, base_url))
 
+                if not items:
+                    print("  [finance direct] No items parsed from direct page, trying RSS fallback...")
+                    items = fetch_finance_rss_items()
+                    if not items:
+                        section_stats[key]["page_errors"] += 1
+
                 section_stats[key]["found"] += len(items)
+
             else:
                 section_stats[key]["page_errors"] += 1
                 print(f"  [finance direct blocked] {base_url} -> {err}")
@@ -488,19 +554,28 @@ def main():
                 section_stats[key]["found"] += len(items)
 
             resolved_items: List[Tuple[str, str, Optional[datetime]]] = []
+            page_dts: List[datetime] = []
+            page_all_have_dates = True
+
             for title, url, pub in items:
                 if pub is None:
-                    if "beckershospitalreview.com" in url:
-                        got, _ = extract_article_date(url)
-                        time.sleep(SLEEP_SEC)
-                        pub = got
-                        if pub is None:
-                            section_stats[key]["missing_date"] += 1
-                            section_stats[key]["article_date_errors"] += 1
-                    else:
+                    got, _ = extract_article_date(url)
+                    time.sleep(SLEEP_SEC)
+                    pub = got
+                    if pub is None:
+                        page_all_have_dates = False
                         section_stats[key]["missing_date"] += 1
+                        section_stats[key]["article_date_errors"] += 1
+
+                if pub is not None:
+                    page_dts.append(pub)
 
                 resolved_items.append((title, url, pub))
+
+            if page_all_have_dates and page_dts:
+                newest_on_page = max(page_dts)
+                if newest_on_page <= watermark:
+                    print("  [finance stop] latest finance item is not newer than watermark")
 
             for title, url, pub in resolved_items:
                 it = Listing(
@@ -511,11 +586,13 @@ def main():
                     published_dt=pub.isoformat() if pub else None,
                 )
 
-                if pub is not None and pub.date() < watermark:
+                if pub is not None and pub <= watermark:
                     section_stats[key]["skipped_old"] += 1
+                    add_to_merged(merged, it)
                     continue
 
                 if url in existing_urls:
+                    section_stats[key]["skipped_existing_url"] += 1
                     add_to_merged(merged, it)
                     continue
 
@@ -537,12 +614,15 @@ def main():
             s = section_stats[key]
             print(
                 f"  [section summary] pages={s['pages']} found={s['found']} new_kept={s['new_kept']} "
-                f"skipped_old={s['skipped_old']} missing_date={s['missing_date']} "
-                f"page_errors={s['page_errors']} article_date_errors={s['article_date_errors']}"
+                f"skipped_old={s['skipped_old']} skipped_existing_url={s['skipped_existing_url']} "
+                f"missing_date={s['missing_date']} page_errors={s['page_errors']} "
+                f"article_date_errors={s['article_date_errors']}"
             )
             continue
 
-        # payer sections
+        # ============================
+        # NON-FINANCE via requests
+        # ============================
         page = 1
         stop_section = False
 
@@ -573,7 +653,7 @@ def main():
 
             section_stats[key]["found"] += len(items)
 
-            page_dates: List[date] = []
+            page_dts: List[datetime] = []
             page_all_have_dates = True
             resolved_items: List[Tuple[str, str, Optional[datetime]]] = []
 
@@ -588,20 +668,16 @@ def main():
                         section_stats[key]["article_date_errors"] += 1
 
                 if pub is not None:
-                    page_dates.append(pub.date())
+                    page_dts.append(pub)
 
                 resolved_items.append((title, url, pub))
 
-            if page_all_have_dates and page_dates:
-                oldest_on_page = min(page_dates)
-                if oldest_on_page < watermark:
+            if page_all_have_dates and page_dts:
+                newest_on_page = max(page_dts)
+                if newest_on_page <= watermark:
                     stop_section = True
 
             for title, url, pub in resolved_items:
-                if pub is not None and pub.date() < watermark:
-                    section_stats[key]["skipped_old"] += 1
-                    continue
-
                 it = Listing(
                     source=source,
                     section=section,
@@ -610,7 +686,13 @@ def main():
                     published_dt=pub.isoformat() if pub else None,
                 )
 
+                if pub is not None and pub <= watermark:
+                    section_stats[key]["skipped_old"] += 1
+                    add_to_merged(merged, it)
+                    continue
+
                 if url in existing_urls:
+                    section_stats[key]["skipped_existing_url"] += 1
                     add_to_merged(merged, it)
                     continue
 
@@ -635,8 +717,9 @@ def main():
         s = section_stats[key]
         print(
             f"  [section summary] pages={s['pages']} found={s['found']} new_kept={s['new_kept']} "
-            f"skipped_old={s['skipped_old']} missing_date={s['missing_date']} "
-            f"page_errors={s['page_errors']} article_date_errors={s['article_date_errors']}"
+            f"skipped_old={s['skipped_old']} skipped_existing_url={s['skipped_existing_url']} "
+            f"missing_date={s['missing_date']} page_errors={s['page_errors']} "
+            f"article_date_errors={s['article_date_errors']}"
         )
 
     with open(OUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
@@ -655,11 +738,11 @@ def main():
     total_seconds = t1 - t0
 
     print("\n==============================")
-    print("[done] Stage 1 full rebuild complete")
-    print(f"Rows kept in this run: {new_kept_total}")
-    print(f"Unique URLs added: {new_added_urls}")
+    print("[done] Stage 1 incremental complete")
+    print(f"New rows kept in this run: {new_kept_total}")
+    print(f"New unique URLs added: {new_added_urls}")
     print(f"Output (merged master) file: {OUT_CSV}")
-    print(f"Output (delta same-as-run file) file: {DELTA_CSV}")
+    print(f"Output (delta new-only) file: {DELTA_CSV}")
     print(f"Runtime: {total_seconds:.2f} sec ({total_seconds/60:.2f} min)")
     print("==============================\n")
 
