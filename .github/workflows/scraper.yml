@@ -54,11 +54,11 @@ jobs:
           sudo chmod +x /usr/local/bin/chromedriver
           chromedriver --version
 
-      - name: Run Stage 1
+      - name: Test finance newsletter page
         run: python stage1_code.py
 
       - name: Run Stage 2
-        run: python stage2_code.py
+        run: python test_finance_newsletter.py
 
       - name: Run Stage 3
         run: python stage3_code.py
