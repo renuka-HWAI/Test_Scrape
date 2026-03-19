@@ -55,7 +55,7 @@ jobs:
           chromedriver --version
 
       - name: Test finance newsletter page
-        run: python stage1_code.py
+        run: python test_finance_newsletter.py
 
       - name: Run Stage 2
         run: python test_finance_newsletter.py
