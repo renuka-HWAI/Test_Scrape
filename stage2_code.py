@@ -50,7 +50,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # IMPORTANT:
 # Make sure Stage 1 outputs file with this name:
-IN_CSV = Path(__file__).resolve().parent / "OUTPUT_STAGE1" / "stage1_delta.csv"
+IN_CSV = Path(__file__).resolve().parent / "OUTPUT_STAGE1" / "listings_2022tocurr_new_delta.csv"
 
 OUT_KEPT_DELTA = OUTPUT_DIR / "stage2_filtered_kept_delta.csv"
 OUT_REMOVED_DELTA = OUTPUT_DIR / "stage2_filtered_removed_delta.csv"
